@@ -3,7 +3,8 @@ from typing import List
 from issf_admin.views import return_robots, return_google_site_verification, update_profile, \
     profile_saved, account_verified, custom_password_change, help_page, fact_archive, contributed_records, logout_view
 
-from frontend.views import new_tip, new_faq, who_feature, geojson_upload, index, table_data_export, profile_csv, country_records
+from frontend.views import new_tip, new_faq, who_feature, geojson_upload, index, profile_csv, country_records
+from frontend.csv_mapping import table_data_export
 from details.views import DetailsSitemap
 
 from django.conf.urls import include, url

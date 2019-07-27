@@ -1,16 +1,11 @@
 import datetime
 import json
-import re
 import os.path
-from typing import Generator, List, Iterable, List
+from typing import Generator, Iterable, List
 
-from zipfile import ZipFile
-
-import djqscsv
 from django.contrib.auth.decorators import login_required
 from django.core.cache import cache
 from django.core.management import call_command
-from django.db.models import QuerySet
 from django.contrib.gis.db.models import Model
 from django.urls import reverse
 from django.http import HttpResponse, HttpResponseRedirect, Http404, HttpRequest, HttpResponseForbidden
@@ -25,8 +20,8 @@ from issf_admin.models import UserProfile
 
 import bleach
 
-from .forms import SearchForm, TipForm, FAQForm, WhosWhoForm, GeoJSONUploadForm
-from frontend.forms import SelectedAttributesFormSet, SelectedThemesIssuesFormSet, SearchForm
+from .forms import TipForm, FAQForm, WhosWhoForm, GeoJSONUploadForm
+from .forms import SelectedAttributesFormSet, SelectedThemesIssuesFormSet, SearchForm
 
 from django.middleware.gzip import GZipMiddleware
 
@@ -228,7 +223,7 @@ def frontend_data(request: HttpRequest) -> HttpResponse:
             contributor_name = contributor_instance.username
             # If the user has defined a name, choose all components of the name that aren't none and add them to the username
             if any([contributor_instance.first_name, contributor_instance.initials, contributor_instance.last_name]):
-                components = (i for i in [contributor_instance.first_name, contributor_instance.initials, contributor_instance.last_name] if i != None)
+                components = (i for i in [contributor_instance.first_name, contributor_instance.initials, contributor_instance.last_name] if i is not None)
                 contributor_name += ' ({})'.format(' '.join(components))
             search_terms.append('Contributor: {}'.format(contributor_name))
             for item in map_queryset[:]:
@@ -349,407 +344,6 @@ def frontend_data(request: HttpRequest) -> HttpResponse:
     return gzip_middleware.process_response(request, HttpResponse(response))
 
 
-class MapLayer(GeoJSONLayerView):
-    """
-    Map layer containing all map points.
-    """
-    geometry_field = 'map_point'
-    queryset = ISSFCoreMapPointUnique.objects.all()
-    properties = ['issf_core_id', 'core_record_type', 'core_record_summary', 'geographic_scope_type']
-
-    def get_context_data(self, **kwargs) -> Context:
-        """
-        Gets the context data for this map.
-
-        :return: The context data.
-        """
-        # this case is called from details to show map points for one record
-        context = super(MapLayer, self).get_context_data(**kwargs)
-        issf_core_id = self.request.GET['issf_core_id']
-        self.queryset = ISSFCoreMapPointUnique.objects.filter(issf_core_id=issf_core_id)
-        return context
-
-
-# This function groups all results currently displayed in the table by record type and exports the records to several
-#  CSV files, one for each record type, and then serves them to user in a .zip file.
-def table_data_export(request: HttpRequest) -> HttpResponse:
-    """
-    View that handles generating and returning zip files containing csv files full of records.
-
-    :param request: The incoming HTTP request.
-    :return: The HTTP response to return to the user.
-    """
-    table_data_file_name = "/tmp/tabledata.zip"
-
-    if request.method == 'POST':
-        map_data = request.POST.getlist('ids[]')
-        # sort based on record type
-        map_data.sort(key=lambda x: x[0])
-
-        # Lists to hold core ids of each record
-        # I'm not proud of this
-        who_items = []
-        sota_items = []
-        profile_items = []
-        org_items = []
-        cap_items = []
-        guide_items = []
-        case_items = []
-        expe_items = []
-
-        # Loop through each item, get the type, and add the core id to the relevant list
-        for item in map_data:
-            record = item.split('&')
-            type = record[0]
-            issf_core_id = record[1]
-
-            if type == 'Capacity Development':
-                cap_items.append(issf_core_id)
-            elif type == 'SSF Guidelines':
-                guide_items.append(issf_core_id)
-            elif type == 'SSF Organization':
-                org_items.append(issf_core_id)
-            elif type == 'SSF Profile':
-                profile_items.append(issf_core_id)
-            elif type == 'State-of-the-Art in SSF Research':
-                sota_items.append(issf_core_id)
-            elif type == 'Who\'s Who in SSF':
-                who_items.append(issf_core_id)
-            elif type == 'Case Study':
-                case_items.append(issf_core_id)
-            elif type == 'SSF Experiences':
-                expe_items.append(issf_core_id)
-
-        # Generate the zipfile containing all the records
-        zipfile = ZipFile(table_data_file_name, 'w')
-
-        cap_records = SSFCapacityNeed.objects.filter(issf_core_id__in=cap_items).values(
-            'issf_core_id',
-            'contributor_id__first_name',
-            'contributor_id__last_name',
-            'contribution_date',
-            'geographic_scope_type',
-            'capacity_need_title',
-            'capacity_need_description',
-            'capacity_need_category',
-            'capacity_need_type'
-        )
-        guide_records = SSFGuidelines.objects.filter(issf_core_id__in=guide_items).values(
-            'issf_core_id',
-            'contributor_id__first_name',
-            'contributor_id__last_name',
-            'contribution_date',
-            'geographic_scope_type',
-            'title',
-            'location', 'start_day',
-            'start_month', 'start_year',
-            'end_day', 'end_month',
-            'end_year', 'organizer',
-            'purpose', 'link',
-            'activity_type',
-            'activity_coverage',
-            'ongoing'
-        )
-        org_records = SSFOrganization.objects.filter(issf_core_id__in=org_items).values(
-            'issf_core_id',
-            'contributor_id__first_name',
-            'contributor_id__last_name',
-            'contribution_date',
-            'geographic_scope_type',
-            'organization_name',
-            'mission',
-            'address1',
-            'address2',
-            'prov_state',
-            'country__short_name',
-            'postal_code',
-            'city_town',
-            'year_established',
-            'ssf_defined',
-            'ssf_definition',
-            'organization_type_union',
-            'organization_type_support',
-            'organization_type_coop',
-            'organization_type_flag',
-            'organization_type_other',
-            'organization_type_other_text',
-            'motivation_voice',
-            'motivation_market',
-            'motivation_sustainability',
-            'motivation_economics',
-            'motivation_rights',
-            'motivation_collaboration',
-            'motivation_other',
-            'motivation_other_text',
-            'activities_capacity',
-            'activities_sustainability',
-            'activities_networking',
-            'activities_marketing',
-            'activities_collaboration',
-            'activities_other',
-            'activities_other_text',
-            'network_types_state',
-            'network_types_ssfos',
-            'network_types_community',
-            'network_types_society',
-            'network_types_ngos',
-            'network_types_other',
-            'network_types_other_text',
-            'achievements',
-            'success_factors', 'obstacles',
-            'organization_point'
-        )
-        pro_records = SSFProfile.objects.filter(issf_core_id__in=profile_items).values(
-            'issf_core_id',
-            'contributor_id__first_name',
-            'contributor_id__last_name',
-            'contribution_date',
-            'geographic_scope_type',
-            'ssf_name',
-            'ssf_defined',
-            'ssf_definition',
-            'data_day',
-            'data_month',
-            'data_year',
-            'data_end_day',
-            'data_end_month',
-            'data_end_year',
-            'comments',
-            'sources',
-            'percent'
-        )
-
-        sota_records = SSFKnowledge.objects.filter(issf_core_id__in=sota_items).values(
-            'issf_core_id',
-            'contribution_date',
-            'contributor__first_name',
-            'contributor__last_name',
-            'geographic_scope_type',
-            'publication_type__publication_type',
-            'other_publication_type',
-            'level1_title',
-            'level2_title',
-            'year',
-            'nonenglish_language__language_name',
-            'nonenglish_title',
-            'ssf_defined',
-            'ssf_definition',
-            'lsf_considered',
-            'fishery_type_details',
-            'gear_type_details',
-            'ecosystem_type_details',
-            'demographics_na',
-            'demographics_age',
-            'demographics_education',
-            'demographics_ethnicity',
-            'demographics_gender',
-            'demographics_health',
-            'demographics_income',
-            'demographics_religion',
-            'demographics_unspecified',
-            'demographics_other',
-            'demographics_other_text',
-            'demographic_details',
-            'employment_na',
-            'employment_full_time',
-            'employment_part_time',
-            'employment_seasonal',
-            'employment_unspecified',
-            'employment_details',
-            'stage_na',
-            'stage_pre_harvest',
-            'stage_harvest',
-            'stage_post_harvest',
-            'stage_unspecified',
-            'market_details',
-            'governance_details',
-            'management_details',
-            'research_method',
-            'method_specify_qualitative',
-            'method_specify_quantitative',
-            'method_specify_mixed',
-            'aim_purpose_question',
-            'theme_issue_details',
-            'solutions_offered',
-            'solution_details',
-            'explicit_implications_recommendations',
-            'implication_details',
-            'comments'
-        )
-        case_records = SSFCaseStudies.objects.filter(issf_core_id__in=case_items).values(
-            'issf_core_id',
-            'contributor_id__first_name',
-            'contributor_id__last_name',
-            'contribution_date',
-            'geographic_scope_type',
-            'name',
-            'role',
-            'description_area',
-            'description_fishery',
-            'description_issues',
-            'issues_challenges',
-            'stakeholders',
-            'transdisciplinary',
-            'background_context',
-            'activities_innovation'
-        )
-        expe_records = SSFExperiences.objects.filter(issf_core_id__in=expe_items).values(
-            'issf_core_id',
-            'contributor_id__first_name',
-            'contributor_id__last_name',
-            'contribution_date',
-            'geographic_scope_type',
-            'title',
-            'name',
-            'description'
-        )
-        who_records = SSFPerson.objects.filter(issf_core_id__in=who_items).values(
-            'issf_core_id',
-            'contributor_id__first_name',
-            'contributor_id__last_name',
-            'contribution_date',
-            'geographic_scope_type',
-            'number_publications',
-            'education_level',
-            'research_method',
-            'issues_addressed',
-            'url',
-            'other_education_level',
-            'affiliation',
-            'address1',
-            'address2',
-            'city_town',
-            'prov_state',
-            'country__short_name',
-            'postal_code',
-            'is_researcher',
-            'person_point'
-        )
-
-        write_file_csv('capacity.csv', cap_records, zipfile)
-        write_file_csv('guidelines.csv', guide_records, zipfile)
-        write_file_csv('organization.csv', org_records, zipfile)
-        write_file_csv('profile.csv', pro_records, zipfile)
-        write_file_csv('state_of_the_art.csv', sota_records, zipfile)
-        write_file_csv('case_studies.csv', case_records, zipfile)
-        write_file_csv('experiences.csv', expe_records, zipfile)
-        write_file_csv('whos_who.csv', who_records, zipfile)
-
-        main_attrs = MainAttributeView.objects.filter(issf_core_id__in=profile_items).values(
-            'issf_core_id',
-            'attribute__question_number',
-            'attribute__attribute_label',
-            'value',
-            'attribute__units_label',
-            'attribute_value__value_label',
-            'other_value',
-            'additional',
-            'additional_value__value_label'
-        )
-
-        write_file_csv('main_attributes.csv', main_attrs, zipfile)
-        author_records = KnowledgeAuthorSimple.objects.filter(knowledge_core__in=sota_items).values()
-        write_file_csv('authors.csv', author_records, zipfile)
-        all_ids = cap_items + guide_items + org_items + profile_items + sota_items + who_items + expe_items + case_items
-        theme_issue_records = CommonThemeIssueView.objects.filter(issf_core_id__in=all_ids).values(
-            'issf_core_id',
-            'selected_theme_issue_id',
-            'theme_issue_value__theme_issue_label',
-            'theme_issue_value__theme_issue__theme_issue_category',
-            'other_theme_issue'
-        )
-
-        characteristic_records = CommonAttributeView.objects.filter(issf_core_id__in=all_ids).values(
-            'issf_core_id',
-            'selected_attribute_id',
-            'attribute__attribute_category',
-            'attribute__attribute_label',
-            'attribute__units_label',
-            'attribute__additional_field',
-            'attribute_value__value_label',
-            'other_value'
-        )
-
-        write_file_csv('themes_issues.csv', theme_issue_records, zipfile)
-        write_file_csv('characteristics.csv', characteristic_records, zipfile)
-
-        geog_scope_local_records = GeographicScopeLocalArea.objects.filter(issf_core_id__in=all_ids).values(
-            'geographic_scope_local_area_id',
-            'issf_core_id',
-            'local_area_name',
-            'local_area_alternate_name',
-            'country__short_name',
-            'local_area_setting',
-            'local_area_setting_other',
-            'local_area_point'
-        )
-        geog_scope_regional_records = Geographic_Scope_Region.objects.filter(issf_core_id__in=all_ids).values(
-            'geographic_scope_region_id',
-            'issf_core_id',
-            'region__region_name',
-            'region_name_other'
-        )
-        geog_scope_subnational_records = GeographicScopeSubnation.objects.filter(issf_core_id__in=all_ids).values(
-            'geographic_scope_subnation_id',
-            'issf_core_id',
-            'subnation_name',
-            'country__short_name',
-            'subnation_type',
-            'subnation_type_other',
-            'subnation_point'
-        )
-        geog_scope_national_records = GeographicScopeNation.objects.filter(issf_core_id__in=all_ids).values(
-            'geographic_scope_nation_id',
-            'issf_core_id',
-            'country__short_name'
-        )
-
-        species_records = Species.objects.filter(issf_core_id__in=all_ids).defer('species_id').values()
-
-        write_file_csv('geog_scope_local.csv', geog_scope_local_records, zipfile)
-        write_file_csv('geog_scope_regional.csv', geog_scope_regional_records, zipfile)
-        write_file_csv('geog_scope_subnational.csv', geog_scope_subnational_records, zipfile)
-        write_file_csv('geog_scope_national.csv', geog_scope_national_records, zipfile)
-
-        write_file_csv('species.csv', species_records, zipfile)
-
-        zipfile.write('/issf/export/README within exported zip files.txt', 'README.txt')
-
-        zipfile.close()
-
-        return HttpResponse("Created tabledata.zip")
-
-    else:
-        # Return the already generated zipfile
-        if os.path.isfile(table_data_file_name):
-            zipfile = open(table_data_file_name, 'rb')
-
-            response = HttpResponse(zipfile, content_type='application/x-zip-compressed')
-            response['Content-Disposition'] = 'attachment; filename="tabledata.zip"'
-
-        else:
-            response = HttpResponse("No tabledata.zip")
-
-        return response
-
-
-def write_file_csv(filename: str, records: QuerySet, zipfile: ZipFile) -> None:
-    """
-    Writes records to a specified file in a zipfile.
-
-    :param filename: The filename to write to
-    :param records: The records to write
-    :param zipfile: The zipfile to write to
-    """
-    if len(records) > 0:
-        csvfile = open('/issf/issf_prod/' + filename, 'wb+')
-        djqscsv.write_csv(records, csvfile, use_verbose_names=False)
-        csvfile.close()
-        zipfile.write(csvfile.name, os.path.basename(csvfile.name))
-    else:
-        return
-
-
 # "Secret" csv exporting URL for GCPC. Only does SSF Profile records and associated characteristics.
 # DO NOT MODIFY, THIS URL IS AUTOMATICALLY HIT.
 # If any change is made to the database, test this URL to make sure everything still works.
@@ -797,7 +391,8 @@ def profile_csv(request: HttpRequest) -> HttpResponse:
     write_file_csv('profile.csv', profile_records, zipfile)
     write_file_csv('main_attributes.csv', main_attrs, zipfile)
 
-    geog_scope_local_records = GeographicScopeLocalArea.objects.filter(issf_core__core_record_type='SSF Profile').values(
+    geog_scope_local_records = GeographicScopeLocalArea.objects.filter(
+        issf_core__core_record_type='SSF Profile').values(
         'geographic_scope_local_area_id',
         'issf_core_id',
         'local_area_name',
@@ -807,13 +402,15 @@ def profile_csv(request: HttpRequest) -> HttpResponse:
         'local_area_setting_other',
         'local_area_point'
     )
-    geog_scope_regional_records = Geographic_Scope_Region.objects.filter(issf_core__core_record_type='SSF Profile').values(
+    geog_scope_regional_records = Geographic_Scope_Region.objects.filter(
+        issf_core__core_record_type='SSF Profile').values(
         'geographic_scope_region_id',
         'issf_core_id',
         'region__region_name',
         'region_name_other'
     )
-    geog_scope_subnational_records = GeographicScopeSubnation.objects.filter(issf_core__core_record_type='SSF Profile').values(
+    geog_scope_subnational_records = GeographicScopeSubnation.objects.filter(
+        issf_core__core_record_type='SSF Profile').values(
         'geographic_scope_subnation_id',
         'issf_core_id',
         'subnation_name',
@@ -822,7 +419,8 @@ def profile_csv(request: HttpRequest) -> HttpResponse:
         'subnation_type_other',
         'subnation_point'
     )
-    geog_scope_national_records = GeographicScopeNation.objects.filter(issf_core__core_record_type='SSF Profile').values(
+    geog_scope_national_records = GeographicScopeNation.objects.filter(
+        issf_core__core_record_type='SSF Profile').values(
         'geographic_scope_nation_id',
         'issf_core_id',
         'country__short_name'
@@ -840,6 +438,27 @@ def profile_csv(request: HttpRequest) -> HttpResponse:
     response['Content-Disposition'] = 'attachment; filename="profile_data.zip"'
 
     return response
+
+
+class MapLayer(GeoJSONLayerView):
+    """
+    Map layer containing all map points.
+    """
+    geometry_field = 'map_point'
+    queryset = ISSFCoreMapPointUnique.objects.all()
+    properties = ['issf_core_id', 'core_record_type', 'core_record_summary', 'geographic_scope_type']
+
+    def get_context_data(self, **kwargs) -> Context:
+        """
+        Gets the context data for this map.
+
+        :return: The context data.
+        """
+        # this case is called from details to show map points for one record
+        context = super(MapLayer, self).get_context_data(**kwargs)
+        issf_core_id = self.request.GET['issf_core_id']
+        self.queryset = ISSFCoreMapPointUnique.objects.filter(issf_core_id=issf_core_id)
+        return context
 
 
 def unique_chain(*iterables: List[Model]) -> Generator[int, None, None]:
